@@ -39,7 +39,7 @@ on:
         description: '是否开启KPM功能?'
         required: true
         type: boolean
-        default: true
+        default: false
       set_defbbr:
         description: '是否将BBR设为默认拥塞算法?（实验性）'
         required: true
@@ -49,7 +49,7 @@ on:
         description: '是否同时获取最新KSU管理器?（实验性功能，报错请关闭）'
         required: true
         type: boolean
-        default: true
+        default: false
 jobs:
 
   build-kernel-a13-5-15:
