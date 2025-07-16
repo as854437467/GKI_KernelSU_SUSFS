@@ -12,15 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Free up disk space
+    - name: Free up disk space first
       run: |
-        echo "==> Before cleanup:"
+        echo "==> Initial disk usage:"
         df -h
         
-        # 删除不需要的软件和文件
+        # 删除大型软件包和文件
         sudo rm -rf /usr/share/dotnet
         sudo rm -rf /usr/local/lib/android
         sudo rm -rf /opt/ghc
@@ -29,12 +26,14 @@ jobs:
         sudo rm -rf /usr/local/graalvm/
         sudo rm -rf /usr/local/share/chromium
         sudo rm -rf /usr/local/lib/node_modules
+        sudo rm -rf /usr/share/swift
         
-        # 清理 apt 缓存
+        # 清理包管理器缓存
         sudo apt-get clean
+        sudo apt-get autoremove -y
         
         # 清理 Docker
-        docker system prune -af || true
+        docker system prune -af 2>/dev/null || true
         
         echo "==> After cleanup:"
         df -h
@@ -53,55 +52,67 @@ jobs:
           python3 \
           git
         
-        # 立即清理 apt 缓存
+        # 立即清理
         sudo apt-get clean
         
-    - name: Setup work directory
+    - name: Create clean workspace
       run: |
+        # 创建全新的工作目录，避免 warning
+        rm -rf ~/kernel 2>/dev/null || true
         mkdir -p ~/kernel
         cd ~/kernel
-        echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
         
-    - name: Clone and setup clang toolchain
+        echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
+        echo "==> Workspace created at: $HOME/kernel"
+        
+    - name: Clone clang toolchain
       run: |
         cd ~/kernel
         echo "==> Cloning Clang toolchain..."
-        git clone --depth=1 --single-branch https://github.com/inferno0230/clang.git clang-toolchain
+        
+        # 使用浅克隆并立即清理
+        git clone --depth=1 --single-branch \
+          https://github.com/inferno0230/clang.git clang-toolchain
         
         # 立即删除 .git 目录节省空间
         rm -rf clang-toolchain/.git
         
-        echo "==> Disk usage after clang:"
-        df -h
+        echo "==> Clang toolchain size:"
+        du -sh clang-toolchain
         
-    - name: Clone kernel sources (minimal)
+    - name: Clone kernel sources
       run: |
         cd ~/kernel
         
-        # 设置git配置
+        # 设置 git 配置避免警告
         git config --global advice.detachedHead false
+        git config --global init.defaultBranch main
         
-        echo "==> Cloning kernel source..."
+        echo "==> Cloning kernel source (1/3)..."
         git clone --depth=1 --single-branch --no-tags \
           https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550.git sm8550
         rm -rf sm8550/.git
         
-        echo "==> Cloning modules source..."
+        echo "==> Cloning modules source (2/3)..."
         git clone --depth=1 --single-branch --no-tags \
           https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-modules.git sm8550-modules
         rm -rf sm8550-modules/.git
         
-        echo "==> Cloning devicetrees source..."
+        echo "==> Cloning devicetrees source (3/3)..."
         git clone --depth=1 --single-branch --no-tags \
           https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-devicetrees.git sm8550-devicetrees
         rm -rf sm8550-devicetrees/.git
         
-        echo "==> Disk usage after sources:"
+        echo "==> Source code sizes:"
+        du -sh sm8550*
+        echo "==> Total disk usage:"
         df -h
         
-    - name: Setup build environment
+    - name: Setup build environment variables
       run: |
         cd ~/kernel
+        
+        # 设置环境变量
         echo "PATH=$HOME/kernel/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "SUBARCH=arm64" >> $GITHUB_ENV
@@ -109,7 +120,11 @@ jobs:
         echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
         echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> $GITHUB_ENV
         
-    - name: Build kernel (optimized)
+        # 验证工具链
+        echo "==> Verifying toolchain:"
+        $HOME/kernel/clang-toolchain/bin/clang --version
+        
+    - name: Configure kernel
       run: |
         cd ~/kernel
         
@@ -119,68 +134,123 @@ jobs:
         # 创建输出目录
         mkdir -p "$OUTPUT_DIR"
         
-        echo "==> Disk before build:"
+        echo "==> Disk usage before configuration:"
         df -h
         
-        # Make参数
+        # Make 参数
         KBUILD_ARGS=(
           "LLVM=1"
-          "LLVM_IAS=1" 
+          "LLVM_IAS=1"
           "CC=clang"
         )
         
-        # 配置文件
+        # 配置文件列表
         DEFCONFIG_FILES="gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config vendor/oplus/aston.config"
         
-        echo "==> Configuring kernel..."
+        echo "==> Merging configuration files..."
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" $DEFCONFIG_FILES
         
-        # 禁用 BTF 以节省空间和时间
+        # 禁用 BTF 以避免 pahole 问题和节省空间
+        echo "==> Disabling BTF to avoid pahole issues..."
         sed -i 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' "${OUTPUT_DIR}/.config"
         
+        # 应用最终配置
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
         
-        echo "==> Building kernel (using 2 cores to save memory)..."
-        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" -j2 "${KBUILD_ARGS[@]}"
+        echo "==> Configuration completed"
         
-        echo "==> Cleaning intermediate files..."
+    - name: Build kernel
+      run: |
+        cd ~/kernel
+        
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
+        
+        echo "==> Starting kernel build..."
+        echo "==> Using 2 parallel jobs to conserve memory"
+        
+        # 构建内核 (使用较少的并行任务以节省内存)
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" -j2 \
+          LLVM=1 LLVM_IAS=1 CC=clang
+        
+        echo "==> Kernel build completed!"
+        
+        # 验证关键文件
+        KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
+        if [ ! -f "$KERNEL_IMAGE" ]; then
+          echo "ERROR: Kernel Image not found at $KERNEL_IMAGE"
+          exit 1
+        fi
+        
+        echo "==> Kernel Image size: $(du -h "$KERNEL_IMAGE" | cut -f1)"
+        
+    - name: Clean build artifacts
+      run: |
+        cd ~/kernel
+        OUTPUT_DIR="$HOME/kernel/out"
+        
+        echo "==> Cleaning intermediate build files..."
+        
+        # 删除中间文件以节省空间
         find "$OUTPUT_DIR" -name "*.o" -delete 2>/dev/null || true
         find "$OUTPUT_DIR" -name "*.cmd" -delete 2>/dev/null || true
         find "$OUTPUT_DIR" -name ".*.d" -delete 2>/dev/null || true
         find "$OUTPUT_DIR" -name "*.mod" -delete 2>/dev/null || true
+        find "$OUTPUT_DIR" -name "*.mod.c" -delete 2>/dev/null || true
+        find "$OUTPUT_DIR" -name "*.symtypes" -delete 2>/dev/null || true
         
-        echo "==> Disk after build:"
+        echo "==> Disk usage after cleanup:"
         df -h
         
-    - name: Create AnyKernel3 package
+    - name: Prepare AnyKernel3 package
       run: |
         cd ~/kernel
         
         OUTPUT_DIR="$HOME/kernel/out"
         FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
         KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
+        DTBO_IMAGE="$OUTPUT_DIR/arch/arm64/boot/dtbo.img"
         
-        if [ ! -f "$KERNEL_IMAGE" ]; then
-          echo "ERROR: Kernel Image not found"
-          exit 1
-        fi
-        
-        # 下载 AnyKernel3 模板
-        echo "==> Downloading AnyKernel3..."
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+        echo "==> Downloading AnyKernel3 template..."
+        git clone --depth=1 --single-branch \
+          https://github.com/osm0sis/AnyKernel3.git
         rm -rf AnyKernel3/.git
         
-        # 创建包目录
+        # 创建最终产品目录
+        rm -rf "$FINAL_PRODUCT_DIR"
         mkdir -p "$FINAL_PRODUCT_DIR/anykernel3"
+        
+        # 复制 AnyKernel3 模板
         cp -r AnyKernel3/* "$FINAL_PRODUCT_DIR/anykernel3/"
+        
+        # 复制内核镜像
         cp "$KERNEL_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
         
-        # 创建 anykernel.sh
+        # 复制 dtbo (如果存在)
+        if [ -f "$DTBO_IMAGE" ]; then
+          cp "$DTBO_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
+          echo "==> DTBO included in package"
+        else
+          echo "==> DTBO not found, skipping"
+        fi
+        
+        echo "==> AnyKernel3 preparation completed"
+        
+    - name: Create custom AnyKernel configuration
+      run: |
+        cd ~/kernel
+        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
+        
+        # 创建自定义 anykernel.sh 配置
         cat > "$FINAL_PRODUCT_DIR/anykernel3/anykernel.sh" << 'EOF'
 #!/sbin/sh
+# AnyKernel3 Ramdisk Mod Script
+# osm0sis @ xda-developers
+
 ## AnyKernel setup
+# begin properties
 properties() { '
-kernel.string=AlphaDroid Kernel for OnePlus 12R
+kernel.string=AlphaDroid Kernel for OnePlus 12R by GitHub Actions
 do.devicecheck=1
 do.modules=0
 do.systemless=1
@@ -191,37 +261,82 @@ device.name2=OnePlus12R
 device.name3=OP5D5DL1
 supported.versions=
 supported.patchlevels=
-'; }
+'; } # end properties
 
+# shell variables
 block=/dev/block/bootdevice/by-name/boot;
 is_slot_device=1;
 ramdisk_compression=auto;
 patch_vbmeta_flag=auto;
 
-## AnyKernel methods
+## AnyKernel methods (DO NOT CHANGE)
+# import patching functions/variables - see for reference
 . tools/ak3-core.sh;
+
+## AnyKernel file attributes
+# set permissions/ownership for included ramdisk files
+set_perm_recursive 0 0 755 644 $ramdisk/*;
+set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
 
 ## AnyKernel install
 dump_boot;
+
 write_boot;
+## end install
 EOF
         
-        # 创建 zip 包
+        echo "==> Custom AnyKernel configuration created"
+        
+    - name: Create final package
+      run: |
+        cd ~/kernel
+        
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
+        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
+        
+        # 进入 AnyKernel3 目录
         cd "$FINAL_PRODUCT_DIR/anykernel3"
+        
+        # 生成包名
         BUILD_DATE=$(date +"%Y%m%d-%H%M")
-        ZIP_NAME="AlphaDroid-Kernel-${BUILD_DATE}.zip"
+        KERNEL_VERSION=$(make -C "$KERNEL_SOURCE_DIR" O="$OUTPUT_DIR" kernelversion 2>/dev/null || echo "unknown")
+        ZIP_NAME="AlphaDroid-Kernel-${KERNEL_VERSION}-${BUILD_DATE}.zip"
+        
+        echo "==> Creating zip package: $ZIP_NAME"
+        
+        # 创建 zip 包
         zip -r9 "../$ZIP_NAME" * -x "*.git*" "*placeholder"
         
+        # 设置环境变量供后续步骤使用
         echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
         echo "ZIP_PATH=$FINAL_PRODUCT_DIR/$ZIP_NAME" >> $GITHUB_ENV
         
-        echo "==> Build completed!"
-        echo "Package: $ZIP_NAME"
-        echo "Size: $(du -h "$FINAL_PRODUCT_DIR/$ZIP_NAME" | cut -f1)"
+        echo "==> Package created successfully!"
+        echo "==> Package size: $(du -h "$FINAL_PRODUCT_DIR/$ZIP_NAME" | cut -f1)"
         
-    - name: Upload kernel
+        # 显示最终磁盘使用情况
+        echo "==> Final disk usage:"
+        df -h
+        
+    - name: Upload kernel package
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.ZIP_NAME }}
         path: ${{ env.ZIP_PATH }}
         retention-days: 7
+        compression-level: 0  # 已经是压缩文件，不需要再压缩
+        
+    - name: Build summary
+      run: |
+        echo "==============================================="
+        echo "           BUILD COMPLETED SUCCESSFULLY"
+        echo "==============================================="
+        echo "Package Name: ${{ env.ZIP_NAME }}"
+        echo "Package Size: $(du -h "${{ env.ZIP_PATH }}" | cut -f1)"
+        echo "Build Date: $(date)"
+        echo "==============================================="
+        
+        # 显示包内容
+        echo "==> Package contents:"
+        unzip -l "${{ env.ZIP_PATH }}" | head -20
