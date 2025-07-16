@@ -152,46 +152,57 @@ jobs:
     - name: Build kernel
       run: |
         cd ~/kernel
-        
+
         # 设置变量
         KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
         OUTPUT_DIR="$HOME/kernel/out"
-        
+
         # 清理输出目录
         rm -rf "$OUTPUT_DIR"
         mkdir -p "$OUTPUT_DIR"
-        
+
         # 显示构建前的磁盘使用情况
         echo "==> Disk usage before build:"
         df -h
-        
+
         # Make参数
         KBUILD_ARGS=(
           "LLVM=1"
           "LLVM_IAS=1"
           "CC=clang"
         )
-        
+
         # 配置文件
         DEFCONFIG_FILES="gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config vendor/oplus/aston.config"
-        
+
         echo "==> Merging config files: ${DEFCONFIG_FILES}"
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" $DEFCONFIG_FILES
-        
+
         echo "==> Updating configuration to latest (olddefconfig)..."
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
-        
+
+        echo "==> Disabling debug info to reduce disk usage..."
+        "${KERNEL_SOURCE_DIR}/scripts/config" --file "$OUTPUT_DIR/.config" \
+          --disable CONFIG_DEBUG_INFO \
+          --disable CONFIG_DEBUG_INFO_BTF
+
+        echo "==> Re-applying config after modification"
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
+
+        echo "==> Final config DEBUG flags:"
+        grep DEBUG_INFO "$OUTPUT_DIR/.config" || true
+
         echo "==> Building Kernel Image"
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" -j$(nproc) "${KBUILD_ARGS[@]}"
-        
+
         echo "==> Kernel build finished successfully!"
-        
+
         # 清理构建中间文件以节省空间
         echo "==> Cleaning up build artifacts..."
         find "$OUTPUT_DIR" -name "*.o" -delete || true
         find "$OUTPUT_DIR" -name "*.cmd" -delete || true
         find "$OUTPUT_DIR" -name ".*.d" -delete || true
-        
+
         # 显示构建后的磁盘使用情况
         echo "==> Disk usage after build:"
         df -h
