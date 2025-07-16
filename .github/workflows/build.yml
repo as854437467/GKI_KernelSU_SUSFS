@@ -60,7 +60,7 @@ jobs:
         echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
         
     - name: Cache clang toolchain
-      uses: actions/cache@v4
+      uses: actions/cache@v3
       id: cache-clang
       with:
         path: ~/kernel/clang-toolchain
@@ -300,7 +300,7 @@ jobs:
         echo "ZIP_PATH=$FINAL_PRODUCT_DIR/$ZIP_NAME" >> $GITHUB_ENV
         
     - name: Upload kernel artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ env.ZIP_NAME }}
         path: ${{ env.ZIP_PATH }}
