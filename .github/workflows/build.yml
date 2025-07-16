@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Free up disk space first
+    - name: Free up disk space
       run: |
         echo "==> Initial disk usage:"
         df -h
@@ -245,10 +245,8 @@ jobs:
         cat > "$FINAL_PRODUCT_DIR/anykernel3/anykernel.sh" << 'EOF'
 #!/sbin/sh
 # AnyKernel3 Ramdisk Mod Script
-# osm0sis @ xda-developers
 
 ## AnyKernel setup
-# begin properties
 properties() { '
 kernel.string=AlphaDroid Kernel for OnePlus 12R by GitHub Actions
 do.devicecheck=1
@@ -261,7 +259,7 @@ device.name2=OnePlus12R
 device.name3=OP5D5DL1
 supported.versions=
 supported.patchlevels=
-'; } # end properties
+'; }
 
 # shell variables
 block=/dev/block/bootdevice/by-name/boot;
@@ -269,20 +267,12 @@ is_slot_device=1;
 ramdisk_compression=auto;
 patch_vbmeta_flag=auto;
 
-## AnyKernel methods (DO NOT CHANGE)
-# import patching functions/variables - see for reference
+## AnyKernel methods
 . tools/ak3-core.sh;
-
-## AnyKernel file attributes
-# set permissions/ownership for included ramdisk files
-set_perm_recursive 0 0 755 644 $ramdisk/*;
-set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
 
 ## AnyKernel install
 dump_boot;
-
 write_boot;
-## end install
 EOF
         
         echo "==> Custom AnyKernel configuration created"
@@ -325,18 +315,3 @@ EOF
         name: ${{ env.ZIP_NAME }}
         path: ${{ env.ZIP_PATH }}
         retention-days: 7
-        compression-level: 0  # 已经是压缩文件，不需要再压缩
-        
-    - name: Build summary
-      run: |
-        echo "==============================================="
-        echo "           BUILD COMPLETED SUCCESSFULLY"
-        echo "==============================================="
-        echo "Package Name: ${{ env.ZIP_NAME }}"
-        echo "Package Size: $(du -h "${{ env.ZIP_PATH }}" | cut -f1)"
-        echo "Build Date: $(date)"
-        echo "==============================================="
-        
-        # 显示包内容
-        echo "==> Package contents:"
-        unzip -l "${{ env.ZIP_PATH }}" | head -20
