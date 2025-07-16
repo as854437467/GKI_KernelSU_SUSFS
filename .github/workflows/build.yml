@@ -60,7 +60,7 @@ jobs:
         echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
         
     - name: Cache clang toolchain
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       id: cache-clang
       with:
         path: ~/kernel/clang-toolchain
