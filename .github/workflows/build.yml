@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Free up disk space first
+    - name: Free up disk space and setup swap
       run: |
         echo "==> Initial disk usage:"
         df -h
@@ -37,6 +37,14 @@ jobs:
         
         echo "==> After cleanup:"
         df -h
+
+        echo "==> Setting up 16GB swap space..."
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+        echo "==> Swap setup completed."
         
     - name: Setup build environment
       run: |
@@ -97,6 +105,10 @@ jobs:
         git fetch --depth=1 origin 9439b847b675efc17f0a94c2c90296ac9ca3f98b
         git checkout FETCH_HEAD
 
+        rm -rf KernelSU
+        rm -rf drivers/kernelsu
+        sed -i '/kernelsu/d' drivers/Makefile
+        sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
         # 可选：节省空间（删除 .git）
         cd ..
         rm -rf sm8550/.git
@@ -115,6 +127,42 @@ jobs:
         du -sh sm8550*
         echo "==> Total disk usage:"
         df -h
+        
+    - name: Add KernelSU-SukiSU Ultra
+      run: |
+        cd ~/kernel/sm8550
+        echo "==> Adding SukiSU Ultra..."
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+        cd ./KernelSU
+        KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+        export KSU_VERSION=$KSU_VERSION
+        sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+        echo "==> SukiSU Ultra added, KSU_VERSION is $KSU_VERSION"
+
+    - name: Apply Patches
+      run: |
+        cd ~/kernel
+        echo "==> Cloning patch repositories..."
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 --depth=1
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git --depth=1
+
+        cd sm8550
+        echo "==> Applying SUSFS patch..."
+        # Based on default android13-5.15
+        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch ./
+        cp -r ../susfs4ksu/kernel_patches/fs/* ./fs/
+        cp -r ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+        patch -p1 < 50_add_susfs_in_gki-android13-5.15.patch || true
+
+        echo "==> Applying Hide Stuff patch..."
+        cp ../SukiSU_patch/69_hide_stuff.patch ./
+        patch -p1 -F 3 < 69_hide_stuff.patch
+
+        echo "==> Applying VFS patch..."
+        cp ../SukiSU_patch/hooks/syscall_hooks.patch ./
+        patch -p1 -F 3 < syscall_hooks.patch
+        echo "==> Patches applied."
         
     - name: Setup build environment variables
       run: |
@@ -158,6 +206,32 @@ jobs:
         echo "==> Merging configuration files..."
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" $DEFCONFIG_FILES
         
+        echo "==> Adding SukiSU configurations..."
+        CONFIG_FILE="${OUTPUT_DIR}/.config"
+        
+        # SukiSU Ultra config
+        echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+        # VFS config (default true)
+        echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+        # SUSFS config (default true for VFS)
+        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+
         # 禁用 BTF 以避免 pahole 问题和节省空间
         echo "==> Disabling BTF to avoid pahole issues..."
         sed -i 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' "${OUTPUT_DIR}/.config"
@@ -192,212 +266,38 @@ jobs:
         
         echo "==> Kernel Image size: $(du -h "$KERNEL_IMAGE" | cut -f1)"
         
-    - name: Clean build artifacts
+    - name: Package with AnyKernel3
       run: |
         cd ~/kernel
-        OUTPUT_DIR="$HOME/kernel/out"
+        echo "==> Cloning AnyKernel3..."
+        git clone https://github.com/Numbersf/AnyKernel3 --depth=1
         
-        echo "==> Cleaning intermediate build files..."
-        
-        # 删除中间文件以节省空间
-        find "$OUTPUT_DIR" -name "*.o" -delete 2>/dev/null || true
-        find "$OUTPUT_DIR" -name "*.cmd" -delete 2>/dev/null || true
-        find "$OUTPUT_DIR" -name ".*.d" -delete 2>/dev/null || true
-        find "$OUTPUT_DIR" -name "*.mod" -delete 2>/dev/null || true
-        find "$OUTPUT_DIR" -name "*.mod.c" -delete 2>/dev/null || true
-        find "$OUTPUT_DIR" -name "*.symtypes" -delete 2>/dev/null || true
-        
-        echo "==> Disk usage after cleanup:"
-        df -h
-        
-    - name: Prepare AnyKernel3 package
+        echo "==> Copying kernel Image..."
+        cp out/arch/arm64/boot/Image AnyKernel3/Image
+
+    - name: Download Latest SUSFS Module from CI
       run: |
         cd ~/kernel
-        
-        OUTPUT_DIR="$HOME/kernel/out"
-        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
-        KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
-        DTBO_IMAGE="$OUTPUT_DIR/arch/arm64/boot/dtbo.img"
-        
-        echo "==> Downloading AnyKernel3 template..."
-        git clone --depth=1 --single-branch \
-          https://github.com/osm0sis/AnyKernel3.git
-        rm -rf AnyKernel3/.git
-        
-        # 创建最终产品目录
-        rm -rf "$FINAL_PRODUCT_DIR"
-        mkdir -p "$FINAL_PRODUCT_DIR/anykernel3"
-        
-        # 复制 AnyKernel3 模板
-        cp -r AnyKernel3/* "$FINAL_PRODUCT_DIR/anykernel3/"
-        
-        # 复制内核镜像
-        cp "$KERNEL_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
-        
-        # 复制 dtbo (如果存在)
-        if [ -f "$DTBO_IMAGE" ]; then
-          cp "$DTBO_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
-          echo "==> DTBO included in package"
-        else
-          echo "==> DTBO not found, skipping"
+        echo "==> Downloading SUSFS Module..."
+        LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+          jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
+
+        if [ -z "$LATEST_RUN_ID" ]; then
+          echo "No successful run found for branch v1.5.2+"
+          exit 1
         fi
-        
-        echo "==> AnyKernel3 preparation completed"
-        
-    - name: Create custom AnyKernel configuration
-      run: |
-        cd ~/kernel
-        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
-        
-        # 创建自定义 anykernel.sh 配置
-        cat > "$FINAL_PRODUCT_DIR/anykernel3/anykernel.sh" << 'EOF'
-        #!/sbin/sh
-        # AnyKernel3 Ramdisk Mod Script
-        # osm0sis @ xda-developers
 
-        ## AnyKernel setup
-        # begin properties
-        properties() {
-        kernel.string=AlphaDroid Kernel for OnePlus 12R by GitHub Actions
-        do.devicecheck=1
-        do.modules=0
-        do.systemless=1
-        do.cleanup=1
-        do.cleanuponabort=0
-        device.name1=aston
-        device.name2=OnePlus12R
-        device.name3=OP5D5DL1
-        supported.versions=15
-        supported.patchlevels=
-        }
+        ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | jq -r '.artifacts[0].archive_download_url')
 
-        # shell variables
-        block=/dev/block/bootdevice/by-name/boot;
-        is_slot_device=1;
-        ramdisk_compression=auto;
-        patch_vbmeta_flag=auto;
-
-        # Android 15 compatibility
-        split_boot=1;
-        no_block_display=1;
-
-        ## AnyKernel methods (DO NOT CHANGE)
-        # import patching functions/variables - see for reference
-        . tools/ak3-core.sh;
-
-        ## AnyKernel file attributes
-        # set permissions/ownership for included ramdisk files
-        set_perm_recursive 0 0 755 644 $ramdisk/*;
-        set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-
-        ## AnyKernel install
-        # Android 15 uses boot image v4 format
-        if [ "$split_boot" ]; then
-          flash_boot;
-        else
-          dump_boot;
-          write_boot;
-        fi
-        ## end install
-        EOF
+        curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o ksu_module_susfs.zip "$ARTIFACT_URL"
+        cp ksu_module_susfs.zip ./AnyKernel3/
+        echo "==> SUSFS Module added to AnyKernel3."
         
-        echo "==> Custom AnyKernel configuration created"
-        
-    - name: Prepare AnyKernel3 package
-      run: |
-        cd ~/kernel
-        
-        OUTPUT_DIR="$HOME/kernel/out"
-        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
-        KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
-        DTBO_IMAGE="$OUTPUT_DIR/arch/arm64/boot/dtbo.img"
-        
-        echo "==> Downloading AnyKernel3 template..."
-        # 使用更兼容的 AnyKernel3 模板
-        git clone --depth=1 --single-branch \
-          https://github.com/Numbersf/AnyKernel3.git
-        rm -rf AnyKernel3/.git
-        
-        # 创建最终产品目录
-        rm -rf "$FINAL_PRODUCT_DIR"
-        mkdir -p "$FINAL_PRODUCT_DIR/anykernel3"
-        
-        # 复制 AnyKernel3 模板
-        cp -r AnyKernel3/* "$FINAL_PRODUCT_DIR/anykernel3/"
-        
-        # 复制内核镜像
-        cp "$KERNEL_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
-        
-        # 复制 dtbo (如果存在)
-        if [ -f "$DTBO_IMAGE" ]; then
-          cp "$DTBO_IMAGE" "$FINAL_PRODUCT_DIR/anykernel3/"
-          echo "==> DTBO included in package"
-        else
-          echo "==> DTBO not found, skipping"
-        fi
-        
-        echo "==> AnyKernel3 preparation completed"
-        
-    - name: Create custom AnyKernel configuration
-      run: |
-        cd ~/kernel
-        FINAL_PRODUCT_DIR="$HOME/kernel/anykernel_out"
-        
-        # 创建自定义 anykernel.sh 配置
-        cat > "$FINAL_PRODUCT_DIR/anykernel3/anykernel.sh" << 'EOF'
-        #!/sbin/sh
-        # AnyKernel3 Ramdisk Mod Script
-        # osm0sis @ xda-developers
-
-        ## AnyKernel setup
-        # begin properties
-        properties() {
-        kernel.string=AlphaDroid Kernel for OnePlus 12R by GitHub Actions
-        do.devicecheck=1
-        do.modules=0
-        do.systemless=1
-        do.cleanup=1
-        do.cleanuponabort=0
-        device.name1=aston
-        device.name2=OnePlus12R
-        device.name3=OP5D5DL1
-        supported.versions=
-        supported.patchlevels=
-        }
-
-        # shell variables
-        block=/dev/block/bootdevice/by-name/boot;
-        is_slot_device=1;
-        ramdisk_compression=auto;
-        patch_vbmeta_flag=auto;
-
-        ## AnyKernel methods (DO NOT CHANGE)
-        # import patching functions/variables - see for reference
-        . tools/ak3-core.sh;
-
-        ## AnyKernel file attributes
-        # set permissions/ownership for included ramdisk files
-        set_perm_recursive 0 0 755 644 $ramdisk/*;
-        set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-
-        ## AnyKernel install
-        dump_boot;
-        write_boot;
-        ## end install
-        EOF
-        
-        echo "==> Custom AnyKernel configuration created"
-    - name: Build summary
-      run: |
-        echo "==============================================="
-        echo "           BUILD COMPLETED SUCCESSFULLY"
-        echo "==============================================="
-        echo "Package Name: ${{ env.ZIP_NAME }}"
-        echo "Package Size: $(du -h "${{ env.ZIP_PATH }}" | cut -f1)"
-        echo "Build Date: $(date)"
-        echo "==============================================="
-        
-        # 显示包内容
-        echo "==> Package contents:"
-        unzip -l "${{ env.ZIP_PATH }}" | head -20
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_oneplus_sm8550_VFS
+        path: /home/runner/kernel/AnyKernel3/*
 
