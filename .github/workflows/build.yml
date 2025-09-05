@@ -109,6 +109,7 @@ jobs:
         git checkout FETCH_HEAD
         cd ..
         rm -rf sm8550/.git
+        git clone https://github.com/as854437467/patch.git
         cp patch/hooks.c sm8550/security/selinux/hooks.c
         cp patch/input.c sm8550/drivers/input/input.c
         cp patch/open.c sm8550/fs/open.c
