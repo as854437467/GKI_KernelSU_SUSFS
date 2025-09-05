@@ -1,18 +1,52 @@
-name: Build Android Kernel
+name: Build OnePlus SM8550 Kernel
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
-  build-kernel:
+  build:
     runs-on: ubuntu-latest
     
     steps:
-    - name: 设置构建环境
+    - name: Free up disk space and setup swap
+      run: |
+        echo "==> Initial disk usage:"
+        df -h
+        
+        # 删除大型软件包和文件
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/local/graalvm/
+        sudo rm -rf /usr/local/share/chromium
+        sudo rm -rf /usr/local/lib/node_modules
+        sudo rm -rf /usr/share/swift
+        
+        # 清理包管理器缓存
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        
+        # 清理 Docker
+        docker system prune -af 2>/dev/null || true
+        
+        echo "==> After cleanup:"
+        df -h
+
+        echo "==> Setting up 16GB swap space..."
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+        echo "==> Swap setup completed."
+        
+    - name: Setup build environment
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -22,202 +56,150 @@ jobs:
           flex \
           libssl-dev \
           libelf-dev \
-          git \
-          wget \
-          curl \
-          python3 \
-          python3-pip \
           zip \
-          unzip
-
-    - name: 克隆内核源码
+          python3 \
+          git
+        
+        # 立即清理
+        sudo apt-get clean
+        
+    - name: Create clean workspace
       run: |
-        echo "正在克隆内核源码..."
-        git clone --depth=1 https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550.git kernel
-        git clone --depth=1 https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-modules.git kernel-modules  
-        git clone --depth=1 https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-devicetrees.git kernel-devicetrees
-
-    - name: 克隆第三方ROM配置文件
+        # 创建全新的工作目录，避免 warning
+        rm -rf ~/kernel 2>/dev/null || true
+        mkdir -p ~/kernel
+        cd ~/kernel
+        
+        echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
+        echo "==> Workspace created at: $HOME/kernel"
+        
+    - name: Clone clang toolchain
       run: |
-        echo "正在克隆kernel_configs..."
+        cd ~/kernel
+        echo "==> Cloning Clang toolchain..."
+        
+        # 使用浅克隆并立即清理
+        git clone --depth=1 --single-branch \
+          https://github.com/inferno0230/clang.git clang-toolchain
+        
+        # 立即删除 .git 目录节省空间
+        rm -rf clang-toolchain/.git
+        
+        echo "==> Clang toolchain size:"
+        du -sh clang-toolchain
+        
+    - name: Clone kernel sources
+      run: |
+        cd ~/kernel
+
+        # 设置 git 配置避免警告
+        git config --global advice.detachedHead false
+        git config --global init.defaultBranch main
+
+        echo "==> Shallow fetch specific commit..."
+
+        git clone --depth=1  --single-branch --no-tags \
+          https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550.git sm8550
+        rm -rf sm8550/.git
+
+        echo "==> Cloning modules source (2/3)..."
+        git clone --depth=1 --single-branch --no-tags \
+          https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-modules.git sm8550-modules
+        rm -rf sm8550-modules/.git
+        
+        echo "==> Cloning devicetrees source (3/3)..."
+        git clone --depth=1 --single-branch --no-tags \
+          https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-devicetrees.git sm8550-devicetrees
+        rm -rf sm8550-devicetrees/.git
+        
         git clone --depth=1 https://github.com/ProjectInfinity-X/kernel_configs.git rom-configs
-
-    - name: 克隆Clang编译器
+        cat "rom-configs/t/android-5.15/android-base.config" \
+        >> "sm8550/kernel/configs/android-base.config"
+        rm -rf rom-configs/.git
+        
+        echo "==> Source code sizes:"
+        du -sh sm8550*
+        echo "==> Total disk usage:"
+        df -h
+        
+    - name: Setup build environment variables
       run: |
-        echo "正在下载Clang编译器..."
-        git clone --depth=1 https://github.com/inferno0230/clang.git toolchain
-
-    - name: 设置编译环境变量
+        cd ~/kernel
+        
+        # 设置环境变量
+        echo "PATH=$HOME/kernel/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "SUBARCH=arm64" >> $GITHUB_ENV
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> $GITHUB_ENV
+        
+        # 验证工具链
+        echo "==> Verifying toolchain:"
+        $HOME/kernel/clang-toolchain/bin/clang --version
+        
+    - name: Configure kernel
       run: |
-        echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel" >> $GITHUB_ENV
-        echo "TOOLCHAIN_DIR=$GITHUB_WORKSPACE/toolchain" >> $GITHUB_ENV
-        echo "MODULES_DIR=$GITHUB_WORKSPACE/kernel-modules" >> $GITHUB_ENV
-        echo "DT_DIR=$GITHUB_WORKSPACE/kernel-devicetrees" >> $GITHUB_ENV
-        echo "ROM_CONFIGS_DIR=$GITHUB_WORKSPACE/rom-configs" >> $GITHUB_ENV
-        echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
-
-    - name: 合并配置文件
-      run: |
-        cd $KERNEL_DIR
+        cd ~/kernel
+        
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
         
         # 创建输出目录
-        mkdir -p $OUT_DIR
+        mkdir -p "$OUTPUT_DIR"
         
-        echo "正在合并配置文件..."
+        echo "==> Disk usage before configuration:"
+        df -h
         
-        # 定义配置文件列表
+        # Make 参数
+        KBUILD_ARGS=(
+          "LLVM=1"
+          "LLVM_IAS=1"
+          "CC=clang"
+        )
+        
+        # 配置文件列表
         DEFCONFIG_FILES="gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config vendor/oplus/aston.config"
         
-        # 检查并复制ROM配置文件到内核源码目录
-        if [ -d "$ROM_CONFIGS_DIR" ]; then
-          echo "复制ROM配置文件到内核目录..."
-          # 查找可能的配置文件目录
-          find $ROM_CONFIGS_DIR -name "*.config" -o -name "defconfig" | while read config_file; do
-            echo "发现配置文件: $config_file"
-          done
-          
-          # 如果存在对应的设备配置，复制到arch/arm64/configs/
-          if [ -d "$ROM_CONFIGS_DIR/sm8550" ]; then
-            cp -r $ROM_CONFIGS_DIR/sm8550/* arch/arm64/configs/ 2>/dev/null || true
-          fi
-          
-          # 查找kalama相关配置
-          find $ROM_CONFIGS_DIR -name "*kalama*" -o -name "*sm8550*" | while read config_file; do
-            echo "复制配置文件: $config_file -> arch/arm64/configs/"
-            cp "$config_file" arch/arm64/configs/ 2>/dev/null || true
-          done
-        fi
+        echo "==> Merging configuration files..."
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" $DEFCONFIG_FILES
         
-        # 生成合并的defconfig
-        echo "生成合并的defconfig..."
-        ARCH=arm64 scripts/kconfig/merge_config.sh $DEFCONFIG_FILES || {
-          echo "配置文件合并失败，尝试使用默认配置..."
-          make ARCH=arm64 defconfig
-        }
-
-    - name: 编译内核
+        echo "==> Adding SukiSU configurations..."
+        CONFIG_FILE="${OUTPUT_DIR}/.config"
+        
+        
+        # 应用最终配置
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
+        
+        echo "==> Configuration completed"
+        
+    - name: Build kernel
       run: |
-        cd $KERNEL_DIR
+        cd ~/kernel
         
-        # 设置编译参数
-        export PATH="$TOOLCHAIN_DIR/bin:$PATH"
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export CC=clang
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export LLVM=1
-        export LLVM_IAS=1
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
         
-        # 显示编译器版本信息
-        echo "编译器版本信息:"
-        clang --version
-        aarch64-linux-gnu-gcc --version 2>/dev/null || echo "GCC not found, using LLVM only"
+        echo "==> Starting kernel build..."
+        echo "==> Using 2 parallel jobs to conserve memory"
         
-        # 清理之前的构建
-        make mrproper
+        # 构建内核 (使用较少的并行任务以节省内存)
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" -j2 \
+          LLVM=1 LLVM_IAS=1 CC=clang
         
-        # 重新生成配置
-        make O=$OUT_DIR ARCH=arm64 defconfig || make O=$OUT_DIR ARCH=arm64 gki_defconfig
+        echo "==> Kernel build completed!"
         
-        # 开始编译
-        echo "开始编译内核..."
-        make O=$OUT_DIR \
-          ARCH=arm64 \
-          CC=clang \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          -j$(nproc --all)
-
-    - name: 编译内核模块
-      run: |
-        cd $KERNEL_DIR
-        
-        echo "编译内核模块..."
-        export PATH="$TOOLCHAIN_DIR/bin:$PATH"
-        
-        make O=$OUT_DIR \
-          ARCH=arm64 \
-          CC=clang \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          modules -j$(nproc --all)
-
-    - name: 创建输出包
-      run: |
-        echo "创建输出包..."
-        mkdir -p release
-        
-        # 复制内核镜像
-        if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
-          cp $OUT_DIR/arch/arm64/boot/Image release/
-          echo "✓ 内核镜像 Image 已生成"
+        # 验证关键文件
+        KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
+        if [ ! -f "$KERNEL_IMAGE" ]; then
+          echo "ERROR: Kernel Image not found at $KERNEL_IMAGE"
+          exit 1
         fi
         
-        if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ]; then
-          cp $OUT_DIR/arch/arm64/boot/Image.gz release/
-          echo "✓ 压缩内核镜像 Image.gz 已生成"
-        fi
+        echo "==> Kernel Image size: $(du -h "$KERNEL_IMAGE" | cut -f1)"
         
-        # 复制设备树文件
-        if [ -d "$OUT_DIR/arch/arm64/boot/dts" ]; then
-          cp -r $OUT_DIR/arch/arm64/boot/dts release/
-          echo "✓ 设备树文件已复制"
-        fi
-        
-        # 收集内核模块
-        find $OUT_DIR -name "*.ko" -exec cp {} release/ \; 2>/dev/null || true
-        
-        # 创建编译信息文件
-        cat > release/build_info.txt << EOF
-        编译时间: $(date)
-        内核版本: $(cd $KERNEL_DIR && make kernelversion)
-        编译器版本: $(clang --version | head -n1)
-        Git提交: $(cd $KERNEL_DIR && git rev-parse HEAD)
-        配置文件: gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config vendor/oplus/aston.config
-        EOF
-        
-        # 创建压缩包
-        cd release
-        zip -r "../kernel-build-$(date +%Y%m%d-%H%M%S).zip" .
-        cd ..
-        
-        echo "构建完成！"
-        ls -la release/
-        ls -la *.zip
-
-    - name: 上传构建产物
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-${{ github.run_number }}
-        path: |
-          release/
-          *.zip
-        retention-days: 30
-
-    - name: 显示构建总结
-      run: |
-        echo "============ 构建总结 ============"
-        echo "构建状态: ✅ 成功"
-        echo "构建时间: $(date)"
-        echo "内核版本: Android13-5.15"
-        echo "目标设备: OnePlus SM8550"
-        echo "编译器: Clang (inferno0230)"
-        echo "================================"
-        
-        if [ -f "release/Image" ]; then
-          echo "✓ 内核镜像大小: $(du -h release/Image | cut -f1)"
-        fi
-        
-        if [ -f "release/Image.gz" ]; then
-          echo "✓ 压缩内核镜像大小: $(du -h release/Image.gz | cut -f1)"
-        fi
-        
-        echo "✓ 构建产物已上传至 Artifacts"
+        name: oneplus_sm8550
+        path: $OUTPUT_DIR/arch/arm64/boot/Image
