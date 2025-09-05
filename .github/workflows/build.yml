@@ -58,7 +58,8 @@ jobs:
           libelf-dev \
           zip \
           python3 \
-          git
+          git \
+          dwarves
         
         # 立即清理
         sudo apt-get clean
@@ -76,8 +77,12 @@ jobs:
     - name: Clone clang toolchain
       run: |
         cd ~/kernel
-        echo "==> Cloning Clang toolchain..."
+        SUSFS_BRANCH="gki-android13-5.15"
+        echo "Using branch for SUSFS: $SUSFS_BRANCH"
+        git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH"
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git
         
+        echo "==> Cloning Clang toolchain..."
         # 使用浅克隆并立即清理
         git clone --depth=1 --single-branch \
           https://github.com/inferno0230/clang.git clang-toolchain
@@ -104,8 +109,13 @@ jobs:
         git checkout FETCH_HEAD
         cd ..
         rm -rf sm8550/.git
-
-        rm -rf KernelSU
+        cp patch/hooks.c sm8550/security/selinux/hooks.c
+        cp patch/input.c sm8550/drivers/input/input.c
+        cp patch/open.c sm8550/fs/open.c
+        cp patch/exec.c sm8550/fs/exec.c
+        cp patch/read_write.c sm8550/fs/read_write.c
+        cp patch/stat.c sm8550/fs/stat.c
+        
         echo "==> Cloning modules source (2/3)..."
         git clone --depth=1 --single-branch --no-tags \
           https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-modules.git sm8550-modules
@@ -126,6 +136,48 @@ jobs:
         echo "==> Total disk usage:"
         df -h
         
+    - name: Add KernelSU-SukiSU Ultra
+      run: |
+        cd ~/kernel/sm8550
+        echo "==> Adding SukiSU Ultra..."
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+    - name: Apply Patches
+      run: |
+        cd ~/kernel
+        cd sm8550
+        echo "==> Applying SUSFS patch..."
+        # Based on default android13-5.15
+        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch ./
+        cp -r ../susfs4ksu/kernel_patches/fs/* ./fs/
+        cp -r ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+        patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android13-5.15.patch || true
+
+        echo "==> Applying VFS patch..."
+        cp ../SukiSU_patch/hooks/syscall_hooks.patch ./
+        patch -p1 -F 3 < syscall_hooks.patch
+        
+        cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./include/linux/
+        cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./lib/
+        cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto/
+        cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./lib/
+        cp ../SukiSU_patch/other/zram/zram_patch/5.15/lz4kd.patch ./
+        echo "正在打lz4kd补丁"
+        patch -p1 -F 3 < lz4kd.patch || true
+        echo '完成LZ4KD补丁'
+
+        cp ../SukiSU_patch/other/zram/zram_patch/5.15/lz4k_oplus.patch ./
+        echo "正在打lz4k_oplus补丁"
+        patch -p1 -F 3 < lz4k_oplus.patch || true
+        echo '完成lz4k_oplus补丁'
+        
+        echo "==> Applying Hide Stuff patch..."
+        cp ../SukiSU_patch/69_hide_stuff.patch ./
+        patch -p1 -F 3 < 69_hide_stuff.patch
+
+
+        
+        echo "==> Patches applied."
     - name: Setup build environment variables
       run: |
         cd ~/kernel
@@ -170,12 +222,56 @@ jobs:
         
         echo "==> Adding SukiSU configurations..."
         CONFIG_FILE="${OUTPUT_DIR}/.config"
+        sed -i 's/^CONFIG_KPROBES=y$/# CONFIG_KPROBES is not set/' "${OUTPUT_DIR}/.config"
+        if ! grep -q '^# CONFIG_KPROBES is not set' "${OUTPUT_DIR}/.config"; then
+          echo '# CONFIG_KPROBES is not set' >> "${OUTPUT_DIR}/.config"
+        fi
 
+        # sed -i 's/CONFIG_MODULE_SIG=y/CONFIG_MODULE_SIG=n/g' "$CONFIG_FILE"
+        echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
+        sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' "$CONFIG_FILE"
+        echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
+        echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
+        echo "CONFIG_CRYPTO_LZ4KD=y" >> "$CONFIG_FILE"
+        echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
+        echo "CONFIG_CRYPTO_LZ4K_OPLUS=y" >> "$CONFIG_FILE"
+        echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+        echo "CONFIG_DEFAULT_BBR=y" >> "$CONFIG_FILE"
+        echo "Adding configuration settings to gki_defconfig..."
+        echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+        echo "CONFIG_TMPFS_XATTR=y" >> "$CONFIG_FILE"
+        echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$CONFIG_FILE"
+        echo "CONFIG_IP_NF_TARGET_TTL=y" >> "$CONFIG_FILE"
+        echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$CONFIG_FILE"
+        echo "CONFIG_IP6_NF_MATCH_HL=y" >> "$CONFIG_FILE"
+        echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$CONFIG_FILE"
+        echo "CONFIG_TCP_CONG_BBR=y" >> "$CONFIG_FILE"
+        echo "CONFIG_NET_SCH_FQ=y" >> "$CONFIG_FILE"
+        echo "CONFIG_TCP_CONG_BIC=n" >> "$CONFIG_FILE"
+        echo "CONFIG_TCP_CONG_WESTWOOD=n" >> "$CONFIG_FILE"
+        echo "CONFIG_TCP_CONG_HTCP=n" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
         
         
         # 应用最终配置
         make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
-        
         echo "==> Configuration completed"
         
     - name: Build kernel
