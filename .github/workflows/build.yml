@@ -8153,7 +8153,7 @@ jobs:
 
         
         # 应用最终配置
-        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
+        # make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
         
         echo "==> Configuration completed"
         
