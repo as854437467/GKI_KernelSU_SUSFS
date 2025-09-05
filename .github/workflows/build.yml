@@ -100,7 +100,7 @@ jobs:
         git init sm8550
         cd sm8550
         git remote add origin https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550.git
-        git fetch --depth=1 origin f7150c6a36d730d02843c951a9cad6e0488a67df
+        git fetch --depth=1 origin b76e7db1ea0f18b661e0973b43c06a74941e41bf
         git checkout FETCH_HEAD
         cd ..
         rm -rf sm8550/.git
