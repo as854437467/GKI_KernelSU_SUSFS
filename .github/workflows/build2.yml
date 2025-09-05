@@ -1,4 +1,4 @@
-name: Build OnePlus SM8550 Kernel
+name: Build OnePlus SM8550 Kernel2
 
 on:
   push:
