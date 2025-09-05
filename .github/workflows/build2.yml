@@ -1,0 +1,207 @@
+name: Build OnePlus SM8550 Kernel
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Free up disk space and setup swap
+      run: |
+        echo "==> Initial disk usage:"
+        df -h
+        
+        # 删除大型软件包和文件
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/local/graalvm/
+        sudo rm -rf /usr/local/share/chromium
+        sudo rm -rf /usr/local/lib/node_modules
+        sudo rm -rf /usr/share/swift
+        
+        # 清理包管理器缓存
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        
+        # 清理 Docker
+        docker system prune -af 2>/dev/null || true
+        
+        echo "==> After cleanup:"
+        df -h
+
+        echo "==> Setting up 16GB swap space..."
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+        echo "==> Swap setup completed."
+        
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          bc \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          zip \
+          python3 \
+          git \
+          dwarves
+        
+        # 立即清理
+        sudo apt-get clean
+        
+    - name: Create clean workspace
+      run: |
+        # 创建全新的工作目录，避免 warning
+        rm -rf ~/kernel 2>/dev/null || true
+        mkdir -p ~/kernel
+        cd ~/kernel
+        
+        echo "WORK_DIR=$HOME/kernel" >> $GITHUB_ENV
+        echo "==> Workspace created at: $HOME/kernel"
+        
+    - name: Clone clang toolchain
+      run: |
+        cd ~/kernel
+        
+        echo "==> Cloning Clang toolchain..."
+        # 使用浅克隆并立即清理
+        git clone --depth=1 --single-branch \
+          https://github.com/inferno0230/clang.git clang-toolchain
+        
+        # 立即删除 .git 目录节省空间
+        rm -rf clang-toolchain/.git
+        
+        echo "==> Clang toolchain size:"
+        du -sh clang-toolchain
+        
+    - name: Clone kernel sources
+      run: |
+        cd ~/kernel
+
+        # 设置 git 配置避免警告
+        git config --global advice.detachedHead false
+        git config --global init.defaultBranch main
+
+        echo "==> Shallow fetch specific commit..."
+        git init sm8550
+        cd sm8550
+        git remote add origin https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550.git
+        git fetch --depth=1 origin b76e7db1ea0f18b661e0973b43c06a74941e41bf
+        git checkout FETCH_HEAD
+        cd ..
+        rm -rf sm8550/.git
+        
+        echo "==> Cloning modules source (2/3)..."
+        git clone --depth=1 --single-branch --no-tags \
+          https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-modules.git sm8550-modules
+        rm -rf sm8550-modules/.git
+        
+        echo "==> Cloning devicetrees source (3/3)..."
+        git clone --depth=1 --single-branch --no-tags \
+          https://github.com/AlphaDroid-devices/kernel_oneplus_sm8550-devicetrees.git sm8550-devicetrees
+        rm -rf sm8550-devicetrees/.git
+        
+        git clone --depth=1 https://github.com/ProjectInfinity-X/kernel_configs.git rom-configs
+        cat "rom-configs/t/android-5.15/android-base.config" \
+        >> "sm8550/kernel/configs/android-base.config"
+        rm -rf rom-configs/.git
+        
+        echo "==> Source code sizes:"
+        du -sh sm8550*
+        echo "==> Total disk usage:"
+        df -h
+        
+    - name: Setup build environment variables
+      run: |
+        cd ~/kernel
+        
+        # 设置环境变量
+        echo "PATH=$HOME/kernel/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "SUBARCH=arm64" >> $GITHUB_ENV
+        echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> $GITHUB_ENV
+        
+        # 验证工具链
+        echo "==> Verifying toolchain:"
+        $HOME/kernel/clang-toolchain/bin/clang --version
+        
+    - name: Configure kernel
+      run: |
+        cd ~/kernel
+        
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
+        
+        # 创建输出目录
+        mkdir -p "$OUTPUT_DIR"
+        
+        echo "==> Disk usage before configuration:"
+        df -h
+        
+        # Make 参数
+        KBUILD_ARGS=(
+          "LLVM=1"
+          "LLVM_IAS=1"
+          "CC=clang"
+        )
+        
+        # 配置文件列表
+        DEFCONFIG_FILES="gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config vendor/oplus/aston.config"
+        
+        echo "==> Merging configuration files..."
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" $DEFCONFIG_FILES
+        
+        echo "==> Adding SukiSU configurations..."
+        CONFIG_FILE="${OUTPUT_DIR}/.config"
+        
+        # 应用最终配置
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" "${KBUILD_ARGS[@]}" olddefconfig
+        echo "==> Configuration completed"
+        
+    - name: Build kernel
+      run: |
+        cd ~/kernel
+        
+        KERNEL_SOURCE_DIR="$HOME/kernel/sm8550"
+        OUTPUT_DIR="$HOME/kernel/out"
+        
+        echo "==> Starting kernel build..."
+        echo "==> Using 2 parallel jobs to conserve memory"
+        
+        # 构建内核 (使用较少的并行任务以节省内存)
+        make -C "${KERNEL_SOURCE_DIR}" O="${OUTPUT_DIR}" -j2 \
+          LLVM=1 LLVM_IAS=1 CC=clang
+        
+        echo "==> Kernel build completed!"
+        
+        # 验证关键文件
+        KERNEL_IMAGE="$OUTPUT_DIR/arch/arm64/boot/Image"
+        if [ ! -f "$KERNEL_IMAGE" ]; then
+          echo "ERROR: Kernel Image not found at $KERNEL_IMAGE"
+          exit 1
+        fi
+        
+        echo "==> Kernel Image size: $(du -h "$KERNEL_IMAGE" | cut -f1)"
+        
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: oneplus_sm8550
+        path: /home/runner/kernel/out/arch/arm64/boot/Image
